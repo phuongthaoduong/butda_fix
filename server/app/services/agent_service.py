@@ -102,6 +102,9 @@ def _run_agent_in_process(query: str, result_queue: multiprocessing.Queue, progr
     """
     Helper function to run agent research in a separate process.
     This isolates agenthub's blocking operations from FastAPI's async event loop.
+
+    NOTE: The agentplug/research-agent doesn't properly integrate web search results with URLs.
+    This implementation directly uses WebSearchTool and then generates a summary using the LLM.
     """
     try:
         # Load environment variables in the subprocess
@@ -145,66 +148,112 @@ def _run_agent_in_process(query: str, result_queue: multiprocessing.Queue, progr
         root_logger.setLevel(logging.INFO)
         root_logger.handlers = [log_handler]
 
-        from agenthub.builtin.tools.web_search import WebSearchTool
-        from agenthub.core.tools import tool
-
         progress_queue.put({"step": "init", "detail": "start"})
 
-        @tool(name="web_search", description="Search the web for a query with AI-powered query rewriting")
-        def web_search(q, exclude_urls):
-            progress_queue.put({"step": "tool", "detail": "web_search"})
-            t = WebSearchTool()
-            res = t.search(q, exclude_urls, max_results=10)
+        # Store search results URLs globally in this process
+        search_results_urls = []
 
-            try:
-                if isinstance(res, list) and res:
-                    for item in res:
-                        title = getattr(item, 'title', None) or getattr(item, 'name', None) or (item.get('title') if isinstance(item, dict) else 'Unknown')
-                        url = getattr(item, 'url', None) or getattr(item, 'link', None) or (item.get('url') if isinstance(item, dict) else '')
-                        if isinstance(title, str):
-                            title = title.strip('"\'')
-                            if ' - ' in title and any(domain in title for domain in ['.com', '.org', '.net', '.gov']):
-                                title = title.split(' - ')[0]
-                        if url and title != 'Unknown':
-                            progress_queue.put({
-                                "step": "log",
-                                "detail": f"Found article: {title}",
-                                "article": {"url": url, "title": title}
-                            })
-                else:
-                    results = getattr(res, "results", None)
-                    if isinstance(results, list) and results:
-                        for item in results:
-                            title = getattr(item, 'title', None) or getattr(item, 'name', None) or (item.get('title') if isinstance(item, dict) else 'Unknown')
-                            url = getattr(item, 'url', None) or getattr(item, 'link', None) or (item.get('url') if isinstance(item, dict) else '')
-                            if isinstance(title, str):
-                                title = title.strip('"\'')
-                                if ' - ' in title and any(domain in title for domain in ['.com', '.org', '.net', '.gov']):
-                                    title = title.split(' - ')[0]
-                            if url and title != 'Unknown':
-                                progress_queue.put({
-                                    "step": "log",
-                                    "detail": f"Found article: {title}",
-                                    "article": {"url": url, "title": title}
-                                })
+        progress_queue.put({"step": "tool", "detail": "web_search"})
 
-                count = len(res) if isinstance(res, list) else len(getattr(res, "results", []))
-                progress_queue.put({"step": "tool", "detail": "web_search_results", "count": count})
-            except Exception as e:
-                progress_queue.put({"step": "log", "detail": f"Error processing results: {str(e)}"})
-                try:
-                    count = len(res) if isinstance(res, list) else len(getattr(res, "results", []))
-                    progress_queue.put({"step": "tool", "detail": "web_search_results", "count": count})
-                except Exception:
-                    pass
+        # Step 1: Perform web search using WebSearchTool
+        from agenthub.builtin.tools.web_search import WebSearchTool
+        web_search_tool = WebSearchTool()
+        raw_results = web_search_tool.search(query, exclude_urls=[], max_results=10)
 
-            return res
+        # DEBUG: Print raw search results
+        print("\n" + "="*80)
+        print("DEBUG: Raw WebSearchTool Results:")
+        print("="*80)
+        print(f"Type: {type(raw_results)}")
+        print("="*80 + "\n")
+
+        # WebSearchTool returns a dict with 'results' key
+        # Extract the results list
+        if isinstance(raw_results, dict) and 'results' in raw_results:
+            results_list = raw_results['results']
+        elif isinstance(raw_results, list):
+            results_list = raw_results
+        else:
+            results_list = []
+
+        # Capture URLs from search results
+        captured_urls = []
+        if isinstance(results_list, list):
+            for item in results_list:
+                # Try different attribute names for URL, title, snippet
+                title = getattr(item, 'title', None) or getattr(item, 'name', None)
+                url = getattr(item, 'url', None) or getattr(item, 'link', None)
+                snippet = getattr(item, 'body', None) or getattr(item, 'snippet', None) or getattr(item, 'description', None)
+
+                # If item is a dict, try dict access
+                if isinstance(item, dict):
+                    title = item.get('title') or item.get('name')
+                    url = item.get('url') or item.get('link')
+                    snippet = item.get('body') or item.get('snippet') or item.get('description') or item.get('content')
+
+                if url:
+                    url_info = {
+                        "title": str(title).strip() if title else "Untitled",
+                        "url": str(url),
+                        "snippet": str(snippet)[:300] if snippet else ""
+                    }
+                    captured_urls.append(url_info)
+
+                    # Send progress event for UI
+                    if title:
+                        progress_queue.put({
+                            "step": "log",
+                            "detail": f"Found article: {title}",
+                            "article": {"url": str(url), "title": str(title)}
+                        })
+
+        search_results_urls = captured_urls
+
+        # DEBUG: Print captured URLs
+        print("\n" + "="*80)
+        print("DEBUG: Captured Search Results URLs:")
+        print("="*80)
+        print(f"Total URLs captured: {len(search_results_urls)}")
+        for i, url_info in enumerate(search_results_urls[:10]):
+            print(f"{i+1}. {url_info.get('title', 'No title')}")
+            print(f"   URL: {url_info.get('url', 'No URL')}")
+            print(f"   Snippet: {url_info.get('snippet', 'No snippet')[:100]}...")
+        if len(search_results_urls) > 10:
+            print(f"... and {len(search_results_urls) - 10} more")
+        print("="*80 + "\n")
+
+        if not search_results_urls:
+            # No search results found, return error
+            progress_queue.put({"step": "error", "detail": "No search results found"})
+            result_queue.put({"success": False, "error": "No search results found"})
+            return
 
         progress_queue.put({"step": "agent", "detail": "load"})
-        # Use local web_search tool defined above, no need for external MCP server
+
+        # Step 2: Use agent to generate a summary with the ORIGINAL query
+        # Don't pass the search results to agent - let it do its own research for quality summary
         agent = ah.load_agent("agentplug/research-agent")
+
         progress_queue.put({"step": "agent", "detail": "run"})
+
+        # Use agent with original query to get high-quality summary
         result = agent.instant_research(query)
+
+        # Add captured URLs to result (for both direct access and sources extraction)
+        if isinstance(result, dict):
+            if "result" in result and isinstance(result["result"], dict):
+                result["result"]["search_results"] = search_results_urls
+            else:
+                result["search_results"] = search_results_urls
+
+        # DEBUG: Print complete agent result structure
+        print("\n" + "="*80)
+        print("DEBUG: COMPLETE AGENT RESULT STRUCTURE (with URLs)")
+        print("="*80)
+        import json
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        print("="*80 + "\n")
+
         progress_queue.put({"step": "agent", "detail": "done"})
 
         result_queue.put({"success": True, "result": result})
@@ -247,21 +296,18 @@ class AgentService:
         if self._llm_unavailable(payload):
             raise LLMUnavailableError(LLM_UNAVAILABLE_HINT)
 
-    def _format_result_content(self, result: dict[str, Any]) -> dict[str, Any]:
+    def _format_content(self, content: str) -> str:
         """
-        Format research result content - parse JSON if present and convert to markdown.
+        Format content - parse JSON if present and convert to markdown.
 
         Args:
-            result: Raw research result from agent
+            content: Raw content string
 
         Returns:
-            Processed result with formatted content
+            Formatted content (markdown if was JSON, otherwise original)
         """
-        # Extract content from result
-        content = result.get("content", "")
-
         if not content:
-            return result
+            return content
 
         logger.info(f"Processing content ({len(content)} chars), starts with: {content[:50]}")
 
@@ -285,15 +331,12 @@ class AgentService:
 
             # Convert JSON to markdown
             formatted = self._json_to_markdown(parsed)
-            result["content"] = formatted
             logger.info(f"Content formatted from JSON to markdown ({len(formatted)} chars)")
+            return formatted
         except (json.JSONDecodeError, ValueError) as e:
             # Not JSON or parsing failed, keep as is
             logger.debug(f"Failed to parse content as JSON: {e}, keeping original")
-            result["content"] = content_after_removal
-            pass
-
-        return result
+            return content_after_removal
 
     def _remove_code_blocks(self, content: str) -> str:
         """Remove markdown code block markers from content."""
@@ -450,6 +493,18 @@ class AgentService:
             agent_result = result_data["result"]
             self._ensure_llm_available(agent_result)
 
+            # DEBUG: Print raw agent result to console
+            print("\n" + "="*80)
+            print("DEBUG: Raw Agent Result Structure:")
+            print("="*80)
+            print(f"Type: {type(agent_result)}")
+            if isinstance(agent_result, dict):
+                print(f"Keys: {list(agent_result.keys())}")
+                print("\nFull Result:")
+                import json
+                print(json.dumps(agent_result, indent=2, ensure_ascii=False))
+            print("="*80 + "\n")
+
             logger.info("Agent research completed successfully", extra={"query": normalized_query})
             return agent_result
 
@@ -580,11 +635,34 @@ class AgentService:
             # agent_result has structure: {'result': {...}, 'execution_time': ...}
             inner_result = agent_result.get("result", agent_result)
             logger.info(f"Formatting inner_result: {type(inner_result)}, keys: {list(inner_result.keys()) if isinstance(inner_result, dict) else 'N/A'}")
-            processed_result = self._format_result_content(inner_result)
 
-            # Keep the original structure
+            # Format content (JSON to Markdown) but preserve rounds/sources
+            content = inner_result.get("content", "")
+
+            # Extract sources from JSON content before formatting
+            sources = []
+            if content:
+                try:
+                    import re
+                    json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        parsed_content = json.loads(json_str)
+                        sources = parsed_content.get("sources", [])
+                        logger.info(f"Extracted {len(sources)} sources from content")
+                except Exception as e:
+                    logger.warning(f"Failed to extract sources: {e}")
+
+            if content:
+                formatted_content = self._format_content(content)
+                inner_result["content"] = formatted_content
+
+            # Add extracted sources to the result for frontend
+            inner_result["sources"] = sources
+
+            # Keep the original structure with rounds and sources
             processed_result = {
-                "result": processed_result,
+                "result": inner_result,
                 "execution_time": agent_result.get("execution_time")
             }
 

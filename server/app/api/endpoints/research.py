@@ -47,16 +47,53 @@ async def run_research(request: ResearchRequest):
         )
         execution_time_ms = int((time.time() - start_time) * 1000)
 
+        # DEBUG: Print raw result from agent service
+        print("\n" + "="*80)
+        print("DEBUG: Raw Result from Agent Service:")
+        print("="*80)
+        print(f"Type: {type(raw_result)}")
+        if isinstance(raw_result, dict):
+            print(f"Keys: {list(raw_result.keys())}")
+            print("\nFull Result:")
+            import json
+            print(json.dumps(raw_result, indent=2, ensure_ascii=False))
+        print("="*80 + "\n")
+
         result_payload = raw_result
         if isinstance(result_payload, dict):
             inner = result_payload.get("result")
             if isinstance(inner, dict):
                 result_payload = inner
+                # DEBUG: Print after extracting inner
+                print("\nDEBUG: After extracting inner 'result':")
+                print(json.dumps(result_payload, indent=2, ensure_ascii=False))
+                print()
 
         # Transform agent result to match frontend ResearchData interface
         if isinstance(result_payload, dict):
             content = result_payload.get("content", "")
             query = result_payload.get("query", request.query)
+
+            # First, try to get sources from search_results (has title, url, snippet)
+            sources = result_payload.get("search_results", [])
+            if not sources:
+                # Fallback: try to extract sources from the JSON in content
+                try:
+                    import re
+                    import json
+
+                    # Content is wrapped in ```json ... ``` markdown, extract the JSON
+                    json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        parsed_content = json.loads(json_str)
+                        # Try sources_used first, then sources
+                        sources = parsed_content.get("sources_used", []) or parsed_content.get("sources", [])
+                        # Convert URLs to source format if needed
+                        if sources and isinstance(sources[0], str):
+                            sources = [{"url": s, "title": "", "snippet": ""} for s in sources]
+                except Exception as e:
+                    logger.warning(f"Failed to parse sources from content: {e}")
 
             # Transform to frontend format
             response = {
@@ -65,9 +102,9 @@ async def run_research(request: ResearchRequest):
                     "query": query,
                     "summary": content,
                     "results": [],  # Agent doesn't provide individual search results
-                    "sources": [],  # Agent doesn't provide source details
+                    "sources": sources,  # Extracted from parsed JSON in content
                     "statistics": {
-                        "totalResults": 0,
+                        "totalResults": len(sources),
                         "processingTime": execution_time_ms,
                         "searchTime": execution_time_ms,
                         "summaryTime": 0
