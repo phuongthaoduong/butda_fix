@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore
+
+# Tests
+tests/
+test_*.py
+*_test.py
+
+# Documentation
+*.md
+
