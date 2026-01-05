@@ -1,6 +1,6 @@
 {
   "app_dir": "server",
-  "build_command": "pip install --upgrade pip && pip install custom_packages/agenthub_sdk-0.1.4-py3-none-any.whl && pip install -r requirements.txt",
+  "build_command": "pip install --upgrade pip && pip install -r requirements.txt && pip install custom_packages/agenthub_sdk-0.1.4-py3-none-any.whl --force-reinstall && pip show agenthub-sdk",
   "start_command": "python start.py",
   "health_check": {
     "path": "/api/health",
