@@ -548,28 +548,42 @@ function App() {
                     <img src={getAssetUrl('/logo.png')} alt="BUTDA" className="message-avatar" />
                     <div className="chat-bubble incoming loading">
                       {isStreaming ? (
-                        <div>
-                          <div className="message-body">
-                            <span>{cotCurrent ? `${cotCurrent.stage}${cotCurrent.message ? `: ${cotCurrent.message}` : ""}` : "Working..."}</span>
+                        <div className="loading-content">
+                          {/* Current status - always visible at top */}
+                          <div className="message-body status-indicator">
+                            <span className="status-text">
+                              {cotCurrent ? `${cotCurrent.stage}${cotCurrent.message ? `: ${cotCurrent.message}` : ""}` : "Working..."}
+                            </span>
+                            <span className="typing-dots-inline">
+                              <span />
+                              <span />
+                              <span />
+                            </span>
                           </div>
-                          {cotMessages.filter(t => t.stage === "Searching" && !!t.article_url).map((t, i) => (
-                            <div key={i} className="message-body">
-                              <span>{t.details ? t.details : (t.message || "Source")}</span>
-                              {t.domain ? (<span>{` · ${t.domain}`}</span>) : null}
-                              {t.article_url ? (
-                                <span>
-                                  {" "}
-                                  <a href={t.article_url} target="_blank" rel="noopener noreferrer">Open</a>
-                                </span>
-                              ) : null}
+                          
+                          {/* Search results list */}
+                          {cotMessages.filter(t => t.stage === "🔎 Searching" && !!t.article_url).length > 0 && (
+                            <div className="sources-list">
+                              <div className="sources-header">Found sources:</div>
+                              {cotMessages.filter(t => t.stage === "🔎 Searching" && !!t.article_url).map((t, i) => (
+                                <div key={i} className="source-item">
+                                  <span className="source-title">{t.details ? t.details : (t.message || "Source")}</span>
+                                  {t.domain ? (<span className="source-domain">{` · ${t.domain}`}</span>) : null}
+                                  {t.article_url ? (
+                                    <a href={t.article_url} target="_blank" rel="noopener noreferrer" className="source-link">Open</a>
+                                  ) : null}
+                                </div>
+                              ))}
                             </div>
-                          ))}
+                          )}
+                          
+                          {/* Currently reading indicator */}
                           {cotActive?.url ? (
-                            <div className="message-body">
-                              <span>Now reading</span>
+                            <div className="message-body reading-indicator">
+                              <span>📖 Now reading</span>
                               {cotActive.title ? (<span>{` – ${cotActive.title}`}</span>) : null}
-                              {cotActive.domain ? (<span>{` · ${cotActive.domain}`}</span>) : null}
-                              <span> <a href={cotActive.url} target="_blank" rel="noopener noreferrer">Open</a></span>
+                              {cotActive.domain ? (<span className="source-domain">{` · ${cotActive.domain}`}</span>) : null}
+                              <a href={cotActive.url} target="_blank" rel="noopener noreferrer" className="source-link">Open</a>
                             </div>
                           ) : null}
                         </div>
