@@ -23,12 +23,12 @@ This installs:
 
 ### 2. Configuration
 
-Set up your environment variables:
+Set up your environment variables (supply at least one LLM key):
 
 ```bash
 cd server
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Edit .env and add OPENAI_API_KEY or DEEPSEEK_API_KEY
 ```
 
 ### 3. Start Services

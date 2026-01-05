@@ -2,9 +2,11 @@ import asyncio
 import logging
 import time
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from app.models.schemas import ResearchRequest
+from app.services.agent_service import AgentService, LLMUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,6 @@ async def run_research(request: ResearchRequest):
         # Use agent service directly
         # Wrap blocking call in asyncio.to_thread() to prevent event loop blocking
         # This is critical for Linux servers where blocking calls in async context can hang
-        from app.services.agent_service import AgentService
-
         start_time = time.time()
         agent_service = AgentService()
         # Run the blocking search in a thread pool to avoid blocking the event loop
@@ -47,15 +47,16 @@ async def run_research(request: ResearchRequest):
         )
         execution_time_ms = int((time.time() - start_time) * 1000)
 
-        # Format response to match ResearchResponse schema expected by frontend
-        from fastapi.responses import JSONResponse
+        result_payload = raw_result
+        if isinstance(result_payload, dict):
+            inner = result_payload.get("result")
+            if isinstance(inner, dict):
+                result_payload = inner
 
         # Transform agent result to match frontend ResearchData interface
-        if isinstance(raw_result, dict):
-            # Extract data from agent response
-            result_data = raw_result.get("result", {})
-            content = result_data.get("content", "")
-            query = result_data.get("query", request.query)
+        if isinstance(result_payload, dict):
+            content = result_payload.get("content", "")
+            query = result_payload.get("query", request.query)
 
             # Transform to frontend format
             response = {
@@ -81,7 +82,7 @@ async def run_research(request: ResearchRequest):
                 "success": True,
                 "data": {
                     "query": request.query,
-                    "summary": str(raw_result),
+                    "summary": str(result_payload),
                     "results": [],
                     "sources": [],
                     "statistics": {
@@ -95,9 +96,20 @@ async def run_research(request: ResearchRequest):
             }
             return JSONResponse(content=response)
 
+    except LLMUnavailableError as exc:
+        logger.warning("LLM unavailable for research request", extra={"query": request.query})
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "success": False,
+                "error": {
+                    "code": "LLM_UNAVAILABLE",
+                    "message": str(exc)
+                }
+            },
+        )
     except Exception as e:
         logger.error("Research endpoint error", exc_info=True, extra={"query": request.query})
-        from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=500,
             content={
@@ -108,4 +120,3 @@ async def run_research(request: ResearchRequest):
                 }
             }
         )
-

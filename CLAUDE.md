@@ -1075,34 +1075,138 @@ pytest tests/test_module.py -v
 
 ## 📚 PROJECT SPECIFICS
 
-### **Python Project Structure**
+### **Being-Up-To-Date Assistant Architecture**
+
+This is a **3-service architecture** where communication flow is critical:
 
 ```
-project/
-├── src/ or package_name/    # Main code
-│   ├── core/                # Core functionality
-│   └── utils/               # Utilities
-├── tests/                   # Test suites
-├── examples/                # Usage examples
-├── requirements.txt         # Dependencies
-└── pyproject.toml           # Config
+Browser (5173) → Backend (8001) → Agent Process (multiprocessing)
+                                          ↓
+                                   Tool Server (8000) [optional MCP]
 ```
+
+**Key Architectural Insight**: The backend (`server/main.py`) runs the `AgentService` in a **separate multiprocessing process** to prevent agenthub's blocking operations from interfering with FastAPI's async event loop. This is critical for Linux servers where blocking calls in async context can hang.
+
+### **Project Structure**
+
+```
+butda_fix/
+├── server/                      # FastAPI backend (Python)
+│   ├── main.py                  # FastAPI app entry point
+│   ├── .env                     # Environment variables (copy from .env.example)
+│   ├── requirements.txt         # Python dependencies
+│   ├── .venv/                   # Python virtual environment
+│   ├── app/
+│   │   ├── api/endpoints/       # API routes (health, research, stream)
+│   │   ├── core/                # Config, logging
+│   │   ├── models/              # Pydantic schemas
+│   │   └── services/            # AgentService (multiprocessing wrapper)
+│   └── tool_server.py           # Optional MCP tool server (port 8000)
+├── client/                      # React + Vite frontend
+│   ├── package.json
+│   └── src/
+├── tool-server/                 # Separate tool server directory
+│   └── requirements.txt
+└── scripts/                     # Startup scripts
+    ├── start-toolserver.sh      # Port 8000
+    ├── start-backend.sh         # Port 8001
+    └── start-frontend.sh        # Port 5173
+```
+
+### **Commands**
+
+**Starting all services (3 terminals required):**
+```bash
+# Terminal 1: Tool Server (port 8000) - optional, provides MCP tools
+./scripts/start-toolserver.sh
+
+# Terminal 2: Backend API (port 8001) - REQUIRED
+cd server
+source .venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+# Terminal 3: Frontend (port 5173)
+cd client
+npm run dev
+```
+
+**Backend development:**
+```bash
+cd server
+source .venv/bin/activate  # Always use .venv
+pip install -r requirements.txt
+pytest tests/ -v           # Run tests
+```
+
+**Frontend development:**
+```bash
+cd client
+npm install                # Install dependencies
+npm run dev                # Start dev server
+npm run build             # Production build
+npm run lint              # ESLint
+```
+
+**Cleanup:**
+```bash
+./scripts/clean.sh         # Stop services, clean logs/cache
+./scripts/clean.sh --full  # Full cleanup including dependencies
+```
+
+### **Critical: AgentService Multiprocessing Pattern**
+
+The `AgentService` (`server/app/services/agent_service.py`) uses multiprocessing to isolate agenthub's blocking operations:
+
+```python
+# Pattern: Run agent in separate process, communicate via queues
+def search(self, query: str, options: dict | None = None) -> dict:
+    manager = multiprocessing.Manager()
+    result_queue = manager.Queue()
+    progress_queue = manager.Queue()
+
+    process = multiprocessing.Process(
+        target=_run_agent_in_process,
+        args=(query, result_queue, progress_queue)
+    )
+    process.start()
+
+    # Monitor progress_queue for status updates
+    # Get final result from result_queue
+```
+
+**Why this matters**: agenthub spawns WebSocket servers and makes blocking HTTP calls. Running in-process with FastAPI causes event loop blocking and hangs on Linux.
+
+### **Environment Configuration**
+
+**Required in `server/.env`:**
+- `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` - LLM provider
+- `OPENAI_BASE_URL` - Optional, for custom endpoints (e.g., DeepSeek)
+
+**Optional:**
+- `REDIS_URL` - Caching (disabled if not set)
+- `PORT` - Backend port (default 8001)
+- `HOST` - Backend host (default 0.0.0.0)
+- `CORS_ORIGINS` - Comma-separated allowed origins
+
+### **API Endpoints**
+
+- `GET /` - Root endpoint
+- `GET /api/health` - Health check
+- `POST /api/research` - Research query (returns JSON)
+- `POST /api/stream` - Research with SSE progress updates
 
 ### **Code Style**
 
-- **Formatter**: Black (88 chars)
-- **Linter**: Ruff (or project-specific)
-- **Type check**: MyPy (if used)
-- **Testing**: pytest
+- **Python**: Black (88 chars), Ruff linter, pytest
+- **TypeScript**: ESLint, Vite for build
 
 ### **Error Patterns**
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| Import error | Missing package or circular | Check requirements.txt, __init__.py |
-| Type error | Wrong types | Add type hints, check compatibility |
-| Attribute error | Missing attribute | Check object type, verify method exists |
-| Key error | Missing dict key | Use .get() with default |
+| `LLMUnavailableError` | No API key configured | Set OPENAI_API_KEY or DEEPSEEK_API_KEY |
+| Agent hangs | Event loop blocking | Ensure AgentService uses multiprocessing |
+| Import error | agenthub not installed | Run `./scripts/install.sh` |
+| Port conflicts | Services already running | Run `./scripts/clean.sh` |
 
 ---
 

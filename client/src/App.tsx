@@ -46,6 +46,19 @@ const getAssetUrl = (path: string) => {
   return new URL(path, import.meta.url).href;
 };
 
+// Debug logger for development
+const debugLog = (category: string, message: string, data?: unknown) => {
+  const timestamp = new Date().toISOString();
+  if (import.meta.env.DEV) {
+    console.log(`[${timestamp}] [${category}]`, message, data || "");
+  }
+  // Store error details for display
+  if (category === "ERROR") {
+    const errorEvent = new CustomEvent("app-error", { detail: { message, data, timestamp } });
+    window.dispatchEvent(errorEvent);
+  }
+};
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [email, setEmail] = useState("");
@@ -57,8 +70,19 @@ function App() {
   const [cotMessages, setCotMessages] = useState<Array<{ stage: string; message?: string; details?: string; article_url?: string; domain?: string }>>([]);
   const [cotActive, setCotActive] = useState<{ url?: string; domain?: string; title?: string } | null>(null);
   const [cotCurrent, setCotCurrent] = useState<{ stage: string; message?: string } | null>(null);
+  const [debugErrors, setDebugErrors] = useState<Array<{ message: string; data?: unknown; timestamp: string }>>([]);
+  const [showDebug, setShowDebug] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const isSendingRef = useRef(false);
+
+  // Listen for debug error events
+  useEffect(() => {
+    const handleErrors = (e: CustomEvent) => {
+      setDebugErrors(prev => [...prev.slice(-9), e.detail]);
+    };
+    window.addEventListener("app-error", handleErrors as EventListener);
+    return () => window.removeEventListener("app-error", handleErrors as EventListener);
+  }, []);
 
   const escapeHtml = (s: string) =>
     s
@@ -143,12 +167,18 @@ function App() {
     setUserInput("");
 
     if (REQUIRE_API) {
+      debugLog("ERROR", "Configuration Error: Missing VITE_API_URL", {
+        isDev: import.meta.env.DEV,
+        apiUrl: import.meta.env.VITE_API_URL,
+        apiBase: API_BASE
+      });
       const message: ChatMessage = {
         id: `error-${Date.now()}`,
         role: "error",
         title: "Configuration Error",
         text: "Thiếu biến VITE_API_URL trong môi trường production.",
-        timestamp: "Just now"
+        timestamp: "Just now",
+        meta: `API_BASE: ${API_BASE || "(empty)"}`
       };
       setMessages((prev) => {
         const filtered = prev.filter((m) => m.role !== "loading");
@@ -177,8 +207,11 @@ function App() {
     const streamPath = base ? `${base}/api/research/stream?query=${encoded}` : `/api/research/stream?query=${encoded}`;
     const streamUrl = new URL(streamPath, window.location.origin).toString();
 
+    debugLog("STREAM", "Connecting to stream", { streamUrl: streamUrl.replace(encoded, "QUERY_ENCODED") });
+
     // Close any existing connection
     if (eventSourceRef.current) {
+      debugLog("STREAM", "Closing existing connection");
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
@@ -188,7 +221,7 @@ function App() {
       eventSourceRef.current = es;
 
       es.onopen = () => {
-        // Connected
+        debugLog("STREAM", "Connection opened", { readyState: es.readyState });
       };
 
       const stageCopy: Record<string, string> = {
@@ -219,6 +252,8 @@ function App() {
           const articleUrl = raw.article_url && typeof raw.article_url === "string" ? raw.article_url : undefined;
           const domain = getDomain(articleUrl);
 
+          debugLog("PROGRESS", `Stage: ${stage}`, { stage, msg, details, articleUrl, domain });
+
           // Friendly copy; show only current stage
           const label = stageCopy[stage] || "Working";
           setCotCurrent({ stage: label, message: msg });
@@ -234,13 +269,14 @@ function App() {
           if (articleUrl && label === "Reading") {
             setCotActive({ url: articleUrl, domain, title: details });
           }
-        } catch (_) {
-          // ignore parse errors
+        } catch (err) {
+          debugLog("ERROR", "Failed to parse progress event", { data: ev.data, error: err });
         }
       };
 
       const handleComplete = (ev: MessageEvent) => {
         try {
+          debugLog("COMPLETE", "Received complete event", { data: ev.data });
           const data = JSON.parse(ev.data);
           const result = data?.data;
           const summary =
@@ -267,12 +303,14 @@ function App() {
             eventSourceRef.current = null;
           }
         } catch (err) {
+          debugLog("ERROR", "Failed to process final result", { data: ev.data, error: err });
           const finalErr: ChatMessage = {
             id: `error-${Date.now()}`,
             role: "error",
             title: "Error",
             text: "Failed to process final result",
-            timestamp: "Just now"
+            timestamp: "Just now",
+            meta: err instanceof Error ? err.message : String(err)
           };
           setIsStreaming(false);
           setIsSending(false);
@@ -291,12 +329,22 @@ function App() {
         try {
           const data = JSON.parse(ev.data);
           const msg = data?.error || data?.message || "Stream error";
+          const code = data?.code;
+          debugLog("ERROR", "Stream error event received", { data, msg, code });
+
+          // Build detailed error message
+          let fullMessage = msg;
+          if (code && code !== "unknown" && code !== "internal_error") {
+            fullMessage = `[${code}] ${msg}`;
+          }
+
           const errMsg: ChatMessage = {
             id: `error-${Date.now()}`,
             role: "error",
             title: "Error",
-            text: msg,
-            timestamp: "Just now"
+            text: fullMessage,
+            timestamp: "Just now",
+            meta: code ? `Error code: ${code}` : undefined
           };
           setIsStreaming(false);
           setIsSending(false);
@@ -308,7 +356,8 @@ function App() {
             eventSourceRef.current.close();
             eventSourceRef.current = null;
           }
-        } catch (_) {
+        } catch (err) {
+          debugLog("ERROR", "Failed to parse error event", { data: ev.data, error: err });
           const errMsg: ChatMessage = {
             id: `error-${Date.now()}`,
             role: "error",
@@ -329,13 +378,19 @@ function App() {
       es.addEventListener("complete", handleComplete);
       es.addEventListener("error", handleErrorEvent);
 
-      es.onerror = () => {
+      es.onerror = (err) => {
+        debugLog("ERROR", "EventSource error occurred", {
+          readyState: es.readyState,
+          url: streamUrl.replace(encoded, "QUERY_ENCODED"),
+          error: err
+        });
         const errMsg: ChatMessage = {
           id: `error-${Date.now()}`,
           role: "error",
-          title: "Error",
-          text: "Connection to server lost",
-          timestamp: "Just now"
+          title: "Connection Error",
+          text: "Connection to server lost. Please check if the backend is running.",
+          timestamp: "Just now",
+          meta: `URL: ${streamUrl.replace(encoded, "QUERY_ENCODED")}`
         };
         setIsStreaming(false);
         setIsSending(false);
@@ -349,6 +404,7 @@ function App() {
         }
       };
     } catch (error) {
+      debugLog("ERROR", "Failed to create EventSource", { error, streamUrl });
       const message =
         error instanceof Error ? error.message : "Failed to start stream";
       finalize({
@@ -356,7 +412,8 @@ function App() {
         role: "error",
         title: "Error",
         text: message,
-        timestamp: "Just now"
+        timestamp: "Just now",
+        meta: error instanceof Error ? error.stack : undefined
       });
       setIsStreaming(false);
       setIsSending(false);
@@ -370,6 +427,46 @@ function App() {
 
   return (
     <div className="app-shell">
+      {/* Debug Panel - Only in development */}
+      {import.meta.env.DEV && debugErrors.length > 0 && (
+        <div style={{
+          position: "fixed",
+          bottom: "80px",
+          right: "20px",
+          maxWidth: "400px",
+          background: "#1a1a1a",
+          color: "#fff",
+          padding: "15px",
+          borderRadius: "8px",
+          fontSize: "12px",
+          zIndex: 9999,
+          maxHeight: "300px",
+          overflow: "auto",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+            <strong style={{ color: "#ff6b6b" }}>🔍 Debug Errors ({debugErrors.length})</strong>
+            <button
+              onClick={() => setDebugErrors([])}
+              style={{ background: "#ff6b6b", border: "none", color: "#fff", padding: "4px 8px", borderRadius: "4px", cursor: "pointer" }}
+            >
+              Clear
+            </button>
+          </div>
+          {debugErrors.map((err, i) => (
+            <div key={i} style={{ marginBottom: "10px", padding: "8px", background: "#2a2a2a", borderRadius: "4px", borderLeft: "3px solid #ff6b6b" }}>
+              <div style={{ color: "#aaa", fontSize: "10px", marginBottom: "4px" }}>{err.timestamp}</div>
+              <div style={{ color: "#ff6b6b", fontWeight: "bold", marginBottom: "4px" }}>{err.message}</div>
+              {err.data && (
+                <pre style={{ color: "#ccc", fontSize: "10px", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {JSON.stringify(err.data, null, 2)}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {!isLoggedIn ? (
         <div className="login-container">
           <section className="login-left">

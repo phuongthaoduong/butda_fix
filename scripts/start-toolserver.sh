@@ -22,4 +22,4 @@ echo "Starting tool server on http://localhost:8000"
 echo "Press Ctrl+C to stop"
 echo ""
 
-exec python tool_server.py
+exec python main.py
