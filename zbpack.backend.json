@@ -1,0 +1,5 @@
+{
+  "app_dir": "server",
+  "build_command": "pip install -r requirements.txt",
+  "start_command": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+}

@@ -1,0 +1,5 @@
+{
+  "app_dir": "tool-server",
+  "build_command": "pip install -r requirements.txt",
+  "start_command": "python tool_server.py"
+}

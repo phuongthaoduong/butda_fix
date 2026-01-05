@@ -1,0 +1,6 @@
+{
+  "app_dir": "client",
+  "build_command": "npm ci && npm run build",
+  "start_command": "npm run preview -- --host 0.0.0.0 --port $PORT",
+  "output_dir": "dist"
+}
