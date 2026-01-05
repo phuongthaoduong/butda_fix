@@ -111,9 +111,9 @@ function App() {
 
     text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
-      const safeUrl = url.startsWith("http") ? url : "#";
-      return `<a href="${safeUrl}" rel="noopener">${label}</a>`;
+    // Handle markdown links - be more flexible with URL patterns
+    text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, (m, label, url) => {
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
     });
 
     const listBlockRegex = /(^|\n)(?:-\s+.*(?:\n-\s+.*)*)/g;
@@ -225,12 +225,12 @@ function App() {
       };
 
       const stageCopy: Record<string, string> = {
-        starting: "Starting",
-        loading: "Loading",
-        searching: "Searching",
-        reading: "Reading",
-        thinking: "Thinking",
-        writing: "Organizing",
+        starting: "🔍 Preparing",
+        loading: "⏳ Loading",
+        searching: "🔎 Searching",
+        reading: "📖 Reading",
+        thinking: "🧠 Analyzing",
+        writing: "✍️ Summarizing",
       };
 
       const getDomain = (u?: string) => {
@@ -586,10 +586,12 @@ function App() {
               }
 
               const isUser = message.role === "user";
+              const isResearchSummary = message.title === "Research Summary";
               const bubbleClass = [
                 "chat-bubble",
                 isUser ? "outgoing" : "incoming",
-                message.role === "error" ? "error" : ""
+                message.role === "error" ? "error" : "",
+                isResearchSummary ? "research-summary" : ""
               ]
                 .filter(Boolean)
                 .join(" ");

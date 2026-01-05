@@ -404,6 +404,137 @@ class AgentService:
         else:
             return str(data)
 
+    def _embed_sources_in_content(self, content: str, sources: list[dict[str, str]]) -> str:
+        """
+        Embed source links directly into the content text.
+        Creates inline links like [Source Title](url) within the text.
+
+        Args:
+            content: The formatted content string
+            sources: List of source dictionaries with 'title', 'url', and optionally 'snippet'
+
+        Returns:
+            Content with embedded inline links
+        """
+        if not sources:
+            return content
+
+        # Filter sources with valid URLs (must start with http)
+        valid_sources = []
+        for s in sources:
+            url = s.get("url", "")
+            if url and (url.startswith("http://") or url.startswith("https://")):
+                valid_sources.append(s)
+        
+        if not valid_sources:
+            logger.warning("No valid sources with URLs found for embedding")
+            return content
+
+        logger.info(f"Embedding {len(valid_sources)} sources into content")
+
+        # Remove any existing "Sources Consulted" or similar sections (LLM-generated placeholders)
+        import re
+        content = re.sub(r'\n\*\*Sources Consulted\*\*[\s\S]*?(?=\n\*\*|$)', '', content)
+        content = re.sub(r'\n## Sources Consulted[\s\S]*?(?=\n##|$)', '', content)
+        content = re.sub(r'\nSources Consulted[\s\S]*?(?=\n[A-Z]|$)', '', content)
+        content = re.sub(r'\n\*\*Research Notes\*\*[\s\S]*?(?=\n\*\*|$)', '', content)
+        content = content.strip()
+
+        # Split content into paragraphs/sections
+        paragraphs = []
+        current_para = []
+        
+        for line in content.split('\n'):
+            line_stripped = line.strip()
+            
+            # Check if this is a section break
+            if not line_stripped and current_para:
+                paragraphs.append('\n'.join(current_para))
+                current_para = []
+            elif line_stripped:
+                current_para.append(line)
+        
+        if current_para:
+            paragraphs.append('\n'.join(current_para))
+        
+        # Filter to get only substantial paragraphs (more than just a heading)
+        substantial_paras = [(i, p) for i, p in enumerate(paragraphs) if len(p.strip()) > 80]
+        
+        if not substantial_paras:
+            # If no substantial paragraphs, use all non-empty paragraphs
+            substantial_paras = [(i, p) for i, p in enumerate(paragraphs) if p.strip()]
+        
+        # Distribute sources across substantial paragraphs
+        sources_per_para = max(1, len(valid_sources) // max(1, len(substantial_paras)))
+        source_idx = 0
+        
+        para_sources = {i: [] for i in range(len(paragraphs))}
+        
+        # Assign sources to paragraphs
+        for para_idx, para_text in substantial_paras:
+            # Assign sources to this paragraph
+            for _ in range(sources_per_para):
+                if source_idx < len(valid_sources):
+                    para_sources[para_idx].append(valid_sources[source_idx])
+                    source_idx += 1
+        
+        # Distribute any remaining sources
+        for remaining_source in valid_sources[source_idx:]:
+            if substantial_paras:
+                # Add to the paragraph with fewest sources
+                min_para_idx = min(
+                    [idx for idx, _ in substantial_paras],
+                    key=lambda x: len(para_sources[x])
+                )
+                para_sources[min_para_idx].append(remaining_source)
+        
+        # Build result with embedded links
+        result_paragraphs = []
+        
+        for i, para in enumerate(paragraphs):
+            assigned = para_sources.get(i, [])
+            
+            if not assigned:
+                result_paragraphs.append(para)
+                continue
+            
+            # Create link strings
+            links = []
+            for source in assigned[:3]:  # Max 3 links per paragraph
+                url = source.get("url", "")
+                title = source.get("title", "Source")
+                
+                # Clean up title
+                if title:
+                    title = title.strip()
+                    # Remove common suffixes like " - Website Name"
+                    if ' - ' in title:
+                        title = title.split(' - ')[0].strip()
+                    if ' | ' in title:
+                        title = title.split(' | ')[0].strip()
+                    # Truncate if too long
+                    if len(title) > 50:
+                        title = title[:47] + "..."
+                else:
+                    title = "Source"
+                
+                if url:
+                    links.append(f"[{title}]({url})")
+            
+            if links:
+                # Add links at the end of the paragraph
+                para_lines = para.rstrip().split('\n')
+                if para_lines:
+                    last_line = para_lines[-1]
+                    # Add space and links
+                    link_text = ' ' + ' '.join(links)
+                    para_lines[-1] = last_line + link_text
+                    para = '\n'.join(para_lines)
+            
+            result_paragraphs.append(para)
+        
+        return '\n\n'.join(result_paragraphs)
+
     def search(self, query: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
         """
         Perform research by spawning a separate process.
@@ -653,12 +784,50 @@ class AgentService:
                 except Exception as e:
                     logger.warning(f"Failed to extract sources: {e}")
 
+            # Get search_results from the result (captured URLs from web search)
+            # Try multiple locations where search_results might be stored
+            search_results = inner_result.get("search_results", [])
+            if not search_results:
+                search_results = agent_result.get("search_results", [])
+            logger.info(f"Found {len(search_results)} search results for embedding")
+            
+            # Debug: log first few search results
+            if search_results:
+                for i, sr in enumerate(search_results[:3]):
+                    logger.info(f"Search result {i+1}: title={sr.get('title', 'N/A')[:30]}, url={sr.get('url', 'N/A')[:50]}")
+
+            # Combine extracted sources with search results
+            all_sources = []
+            
+            # Add sources from JSON content first (if they have URLs)
+            for s in sources:
+                if isinstance(s, dict) and s.get("url"):
+                    all_sources.append(s)
+                elif isinstance(s, str) and s.startswith("http"):
+                    # If source is just a URL string
+                    all_sources.append({"url": s, "title": "Source"})
+            
+            # Add search results - these are the main sources with real URLs
+            for sr in search_results:
+                if isinstance(sr, dict) and sr.get("url"):
+                    url = sr.get("url")
+                    # Check if not already in all_sources
+                    if not any(s.get("url") == url for s in all_sources):
+                        all_sources.append(sr)
+
+            logger.info(f"Total sources for embedding: {len(all_sources)}")
+            if all_sources:
+                logger.info(f"First source: {all_sources[0]}")
+
             if content:
                 formatted_content = self._format_content(content)
+                # Embed source links directly into the content
+                if all_sources:
+                    formatted_content = self._embed_sources_in_content(formatted_content, all_sources)
                 inner_result["content"] = formatted_content
 
             # Add extracted sources to the result for frontend
-            inner_result["sources"] = sources
+            inner_result["sources"] = all_sources
 
             # Keep the original structure with rounds and sources
             processed_result = {

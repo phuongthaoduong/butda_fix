@@ -276,8 +276,17 @@
 }
 
 .chat-bubble.incoming {
-  background: var(--bubble-blue);
+  background: #e8f4fc;
   border-bottom-left-radius: 4px;
+}
+
+/* Research summary card style */
+.chat-bubble.incoming.research-summary {
+  background: linear-gradient(135deg, #e8f4fc 0%, #f0f7ff 100%);
+  border: 1px solid #c7e0f4;
+  border-radius: 16px;
+  padding: 1.5rem;
+  max-width: 720px;
 }
 
 .chat-bubble.outgoing {
@@ -340,12 +349,19 @@
 }
 
 .message-body a {
-  color: var(--primary);
+  color: #2563eb;
   text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s ease;
 }
 
 .message-body a:hover {
+  color: #1d4ed8;
   text-decoration: underline;
+}
+
+.message-body a:visited {
+  color: #7c3aed;
 }
 
 .message-meta {
