@@ -1,8 +1,9 @@
 import { FormEvent, useState, useRef, useEffect } from "react";
 import "./App.css";
+import { supabase } from "./supabaseClient";
 
 type MessageRole = "assistant" | "user" | "error" | "loading";
-type PageType = "login" | "chat";
+type PageType = "login" | "signup" | "chat";
 
 interface ChatMessage {
   id: string;
@@ -18,6 +19,16 @@ const featureCards = [
   { icon: "🤖", title: "AI-Powered Summaries" },
   { icon: "⚡", title: "Real-time Updates" },
   { icon: "🛡️", title: "Trusted Sources" }
+];
+
+const regions = [
+  "North America",
+  "Europe",
+  "Asia",
+  "South America",
+  "Africa",
+  "Oceania",
+  "Middle East"
 ];
 
 const initialMessages: ChatMessage[] = [
@@ -66,9 +77,18 @@ const debugLog = (category: string, message: string, data?: unknown) => {
 };
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<PageType>("chat");
+  const [currentPage, setCurrentPage] = useState<PageType>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  // Signup states
+  const [signupName, setSignupName] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupRegion, setSignupRegion] = useState("");
+  const [signupTopics, setSignupTopics] = useState("");
+  const [signupError, setSignupError] = useState("");
+  const [signupSuccess, setSignupSuccess] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [userInput, setUserInput] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -92,13 +112,100 @@ function App() {
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [pendingEditItem, setPendingEditItem] = useState<ChatMessage | null>(null);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [profileName, setProfileName] = useState("User");
   const [profileTopics, setProfileTopics] = useState("");
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editingProfileName, setEditingProfileName] = useState("User");
   const [editingProfileTopics, setEditingProfileTopics] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
   const isSendingRef = useRef(false);
+
+  // Check auth state on app load
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          // Check if email is confirmed
+          if (session.user.email_confirmed_at) {
+            setUser(session.user);
+            setCurrentPage("chat");
+          }
+        }
+      } catch (error) {
+        console.error('Error checking auth:', error);
+      } finally {
+        setCheckingAuth(false);
+      }
+    };
+
+    checkAuth();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        if (session.user.email_confirmed_at) {
+          setUser(session.user);
+          setCurrentPage("chat");
+        }
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setCurrentPage("login");
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Sync profile data from user metadata
+  useEffect(() => {
+    if (user?.user_metadata) {
+      const metadata = user.user_metadata;
+      if (metadata.name) {
+        setProfileName(metadata.name);
+      }
+      if (metadata.interesting_topics) {
+        setProfileTopics(metadata.interesting_topics);
+      }
+    } else if (!user) {
+      // Reset to defaults when user logs out
+      setProfileName("User");
+      setProfileTopics("");
+    }
+  }, [user]);
+
+  // Handle email verification callback from URL
+  useEffect(() => {
+    const handleEmailConfirmation = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const accessToken = params.get('access_token');
+      const refreshToken = params.get('refresh_token');
+
+      if (accessToken && refreshToken) {
+        try {
+          const { data, error } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          });
+
+          if (!error && data.user?.email_confirmed_at) {
+            setUser(data.user);
+            setCurrentPage("chat");
+            // Clear URL parameters
+            window.history.replaceState({}, '', window.location.pathname);
+          }
+        } catch (error) {
+          console.error('Error handling email confirmation:', error);
+        }
+      }
+    };
+
+    handleEmailConfirmation();
+  }, []);
 
   // Apply dark mode to document
   useEffect(() => {
@@ -181,10 +288,118 @@ function App() {
     return text;
   };
 
-  const handleLogin = (event: FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (email && password) {
+    setLoginError("");
+
+    if (!email || !password) {
+      setLoginError("Please enter your email and password.");
+      return;
+    }
+
+    try {
+      // Attempt to sign in with Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: email,
+        password: password,
+      });
+
+      if (authError) {
+        setLoginError(authError.message);
+        return;
+      }
+
+      // Check if email is verified
+      if (authData.user && !authData.user.email_confirmed_at) {
+        setLoginError("Please verify your email before logging in. Check your inbox for the verification link.");
+        return;
+      }
+
+      // Login successful - proceed to chat
       setCurrentPage("chat");
+
+    } catch (error) {
+      setLoginError("An unexpected error occurred during login. Please try again.");
+    }
+  };
+
+  const handleSignup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSignupError("");
+    setSignupSuccess(false);
+
+    try {
+      // Sign up with Supabase Auth with email confirmation required
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: signupEmail,
+        password: signupPassword,
+        options: {
+          data: {
+            name: signupName,
+            region: signupRegion,
+            interesting_topics: signupTopics,
+          },
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+        },
+      });
+
+      if (authError) {
+        setSignupError(authError.message);
+        return;
+      }
+
+      // Check if email confirmation is required
+      if (authData.user && !authData.user.email_confirmed_at) {
+        // Email confirmation required - show verification pending state
+        setSignupSuccess(true);
+        return;
+      }
+
+      // If email is already confirmed (rare case), proceed with profile creation
+      if (authData.user) {
+        const { error: profileError } = await supabase
+          .from('profiles')
+          .insert([
+            {
+              id: authData.user.id,
+              email: signupEmail,
+              name: signupName,
+              region: signupRegion,
+              interesting_topics: signupTopics,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+
+        if (profileError) {
+          console.error('Error creating profile:', profileError);
+        }
+
+        setSignupSuccess(true);
+        setTimeout(() => {
+          setCurrentPage("login");
+        }, 2000);
+      }
+
+    } catch (error) {
+      setSignupError("An unexpected error occurred. Please try again.");
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setSignupError("");
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: signupEmail,
+      });
+
+      if (error) {
+        setSignupError(error.message);
+      } else {
+        alert('Verification email resent! Please check your inbox.');
+      }
+    } catch (error) {
+      setSignupError("Failed to resend verification email.");
     }
   };
 
@@ -316,10 +531,25 @@ function App() {
     setIsEditingProfile(true);
   };
 
-  const saveProfile = () => {
+  const saveProfile = async () => {
+    // Update local state
     setProfileName(editingProfileName);
     setProfileTopics(editingProfileTopics);
     setIsEditingProfile(false);
+
+    // Update Supabase user metadata
+    if (user) {
+      try {
+        await supabase.auth.updateUser({
+          data: {
+            name: editingProfileName,
+            interesting_topics: editingProfileTopics,
+          },
+        });
+      } catch (error) {
+        console.error('Error updating profile:', error);
+      }
+    }
   };
 
   const cancelEditProfile = () => {
@@ -669,6 +899,18 @@ function App() {
 
   return (
     <div className="app-shell">
+      {/* Loading screen while checking auth */}
+      {checkingAuth && (
+        <div className="auth-loading-screen">
+          <div className="auth-loading-content">
+            <img src={getAssetUrl('/logo.png')} alt="BUTDA Logo" className="auth-loading-logo" />
+            <h2>BUTDA</h2>
+            <p>Being-Up-To-Date Assistant</p>
+            <div className="auth-loading-spinner"></div>
+          </div>
+        </div>
+      )}
+
       {/* Debug Panel - Only in development */}
       {import.meta.env.DEV && debugErrors.length > 0 && (
         <div style={{
@@ -737,6 +979,11 @@ function App() {
               </div>
               <h3>Sign in to your account</h3>
               <form onSubmit={handleLogin}>
+                {loginError && (
+                  <div className="login-error-message">
+                    {loginError}
+                  </div>
+                )}
                 <label>
                   Email address
                   <input
@@ -760,7 +1007,128 @@ function App() {
                 <button type="submit">Sign in</button>
               </form>
               <p className="signup-hint">
-                Don't have an account? <span>Sign up</span>
+                Don't have an account? <span onClick={() => setCurrentPage("signup")}>Sign up</span>
+              </p>
+            </div>
+          </section>
+        </div>
+      ) : currentPage === "signup" ? (
+        <div className="signup-container">
+          <section className="signup-left">
+            <div className="signup-left-inner">
+              <h1>Join BUTDA Today</h1>
+              <p>
+                Create your account and start staying up-to-date with personalized news feeds tailored to your interests.
+              </p>
+              <div className="feature-grid">
+                {featureCards.map((card) => (
+                  <article key={card.title} className="feature-card">
+                    <span className="feature-icon">{card.icon}</span>
+                    <p>{card.title}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </section>
+          <section className="signup-right">
+            <div className="signup-card">
+              <div className="brand-badge">
+                <img src={getAssetUrl('/logo.png')} alt="BUTDA Logo" />
+                <h2>BUTDA</h2>
+                <p>Being-Up-To-Date Assistant</p>
+              </div>
+              <h3>Create your account</h3>
+              {signupSuccess ? (
+                <div className="signup-success">
+                  <div className="verification-icon">📧</div>
+                  <h4>Check your email!</h4>
+                  <p>We've sent a verification email to <strong>{signupEmail}</strong></p>
+                  <p className="verification-instructions">
+                    Please click the link in the email to verify your account. You won't be able to sign in until you verify your email.
+                  </p>
+                  <div className="verification-actions">
+                    <button
+                      type="button"
+                      className="resend-verification-btn"
+                      onClick={handleResendVerification}
+                    >
+                      Resend verification email
+                    </button>
+                    <button
+                      type="button"
+                      className="back-to-login-btn"
+                      onClick={() => setCurrentPage("login")}
+                    >
+                      Go to login
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSignup}>
+                  {signupError && (
+                    <div className="signup-error">
+                      {signupError}
+                    </div>
+                  )}
+                  <label>
+                    Name
+                    <input
+                      type="text"
+                      value={signupName}
+                      onChange={(event) => setSignupName(event.target.value)}
+                      placeholder="Your full name"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Email address
+                    <input
+                      type="email"
+                      value={signupEmail}
+                      onChange={(event) => setSignupEmail(event.target.value)}
+                      placeholder="you@example.com"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      type="password"
+                      value={signupPassword}
+                      onChange={(event) => setSignupPassword(event.target.value)}
+                      placeholder="••••••••"
+                      required
+                      minLength={6}
+                    />
+                  </label>
+                  <label>
+                    Region
+                    <select
+                      value={signupRegion}
+                      onChange={(event) => setSignupRegion(event.target.value)}
+                      required
+                    >
+                      <option value="">Select your region</option>
+                      {regions.map((region) => (
+                        <option key={region} value={region}>{region}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Interesting Topics
+                    <textarea
+                      value={signupTopics}
+                      onChange={(event) => setSignupTopics(event.target.value)}
+                      placeholder="e.g., Technology, Science, Politics, Entertainment, Sports..."
+                      rows={3}
+                      required
+                    />
+                  </label>
+                  <button type="submit">Create account</button>
+                </form>
+              )}
+              <p className="signup-hint">
+                Already have an account? <span onClick={() => setCurrentPage("login")}>Sign in</span>
               </p>
             </div>
           </section>
@@ -805,9 +1173,15 @@ function App() {
                 <header className="app-header">
                   <div className="header-left"></div>
                   <div className="header-right">
-                    <button className="signin-button" type="button" onClick={() => setCurrentPage("login")}>
-                      Sign In
-                    </button>
+                    {user ? (
+                      <button className="profile-icon-button" type="button" onClick={() => setCurrentView("settings")} aria-label="Profile">
+                        <span className="profile-icon">👤</span>
+                      </button>
+                    ) : (
+                      <button className="signin-button" type="button" onClick={() => setCurrentPage("login")}>
+                        Sign In
+                      </button>
+                    )}
                   </div>
                 </header>
                 <main className="chat-main">
@@ -1242,13 +1616,6 @@ function App() {
                           <p>Update your account password</p>
                         </div>
                         <button className="settings-action-btn">Change</button>
-                      </div>
-                      <div className="settings-item">
-                        <div className="settings-item-info">
-                          <h4>Export Data</h4>
-                          <p>Download all your saved items and chats</p>
-                        </div>
-                        <button className="settings-action-btn">Export</button>
                       </div>
                       <div className="settings-item danger">
                         <div className="settings-item-info">
